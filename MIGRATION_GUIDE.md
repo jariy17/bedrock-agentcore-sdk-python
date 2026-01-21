@@ -1,6 +1,9 @@
 # Migration Guide: MemoryClient and IdentityClient Deprecation
 
-This document provides detailed migration instructions for each operation in the deprecated `MemoryClient` and `IdentityClient` classes.
+This document provides detailed migration instructions for deprecated operations in `MemoryClient` and `IdentityClient`:
+
+- **MemoryClient**: All operations are deprecated. Migrate to `UnifiedBedrockAgentCoreClient` (control plane) and `MemorySessionManager` (data plane).
+- **IdentityClient**: Only simple boto3 wrapper methods are deprecated. **OAuth flow methods (`get_token()`, `get_api_key()`) remain in IdentityClient** as they provide business logic beyond simple API calls.
 
 ## Table of Contents
 
@@ -1381,101 +1384,34 @@ token = client.get_workload_access_token(
 
 ---
 
-#### `get_token()` (Async OAuth Flow)
+#### `get_token()` and `get_api_key()`
 
-**Before (IdentityClient):**
-```python
-token = await client.get_token(
-    workload_name="my-identity",
-    user_token="oauth-token",
-    token_poller=my_custom_poller,  # Optional
-    on_auth_url=lambda url: print(f"Visit: {url}")  # Callback
-)
-```
+**NOT DEPRECATED** - These methods remain in IdentityClient.
 
-**After:**
+These methods provide business logic (async OAuth flows with token polling) that goes beyond simple boto3 wrappers. Continue using IdentityClient for these operations:
 
-**Option 1: Keep IdentityClient (RECOMMENDED for complex OAuth):**
 ```python
 from bedrock_agentcore.services import IdentityClient
 
-identity_client = IdentityClient(region="us-west-2")
-token = await identity_client.get_token(
+client = IdentityClient(region="us-west-2")
+
+# OAuth flow with automatic polling
+token = await client.get_token(
     workload_name="my-identity",
     user_token="oauth-token",
     on_auth_url=lambda url: print(f"Visit: {url}")
 )
-```
 
-**Option 2: Implement with UnifiedClient (Complex):**
-```python
-from bedrock_agentcore import UnifiedBedrockAgentCoreClient
-import asyncio
-
-client = UnifiedBedrockAgentCoreClient(region_name="us-west-2")
-
-# Start OAuth flow
-auth_response = client.get_workload_access_token(
-    workloadName="my-identity",
-    userToken="oauth-token"
-)
-
-# If auth URL returned, need to poll
-if 'authorizationUrl' in auth_response:
-    auth_url = auth_response['authorizationUrl']
-    print(f"Visit: {auth_url}")
-
-    # Poll for token
-    max_attempts = 60
-    for i in range(max_attempts):
-        await asyncio.sleep(5)
-        try:
-            token_response = client.get_workload_access_token(
-                workloadName="my-identity",
-                userToken="oauth-token"
-            )
-            if 'accessToken' in token_response:
-                token = token_response['accessToken']
-                break
-        except Exception:
-            continue
-    else:
-        raise TimeoutError("User did not complete OAuth flow")
-else:
-    token = auth_response['accessToken']
-```
-
-**Migration Notes:**
-- For complex OAuth flows, **consider keeping IdentityClient**
-- UnifiedClient requires ~30 lines of custom polling logic
-- Must handle authorization URL callback
-- Must implement async polling loop
-
----
-
-#### `get_api_key()`
-
-**Before (IdentityClient):**
-```python
+# Get API key with async support
 api_key = await client.get_api_key(
     provider_name="my-provider",
     agent_identity_token=token
 )
 ```
 
-**After (UnifiedBedrockAgentCoreClient):**
-```python
-api_key_response = client.get_api_key(
-    providerName="my-provider",
-    agentIdentityToken=token
-)
-api_key = api_key_response['apiKey']
-```
-
 **Migration Notes:**
-- Change to synchronous call (no await needed)
-- Change parameter names to camelCase
-- Extract apiKey from response dict
+- No migration needed - these methods stay in IdentityClient
+- These provide async OAuth flow handling that UnifiedClient doesn't replace
 
 ---
 
@@ -1498,8 +1434,8 @@ api_key = api_key_response['apiKey']
 |---------------|--------------|---------------------|---------------------|
 | **Workload Identity (Simple)** | 5 | Easy | UnifiedBedrockAgentCoreClient |
 | **Credential Providers** | 5 | Easy | UnifiedBedrockAgentCoreClient |
-| **Token Operations (Simple)** | 2 | Easy | UnifiedBedrockAgentCoreClient |
-| **OAuth Flow** | 1 | Hard | Keep IdentityClient OR Custom Implementation |
+| **Token Operations (Simple)** | 1 | Easy | UnifiedBedrockAgentCoreClient |
+| **OAuth Flow (get_token, get_api_key)** | 2 | N/A | **NOT DEPRECATED - Keep using IdentityClient** |
 
 ---
 
@@ -1601,9 +1537,9 @@ Do you need memory operations?
 │           → MemorySessionManager (MUST USE)
 │
 └─ NO: Identity Operations
-    ├─ Simple identity/credential operations
+    ├─ Simple identity/credential operations (create/get/update/delete)
     │   → UnifiedBedrockAgentCoreClient
     │
-    └─ Complex OAuth flows with token polling
-        → Keep IdentityClient OR Implement custom polling
+    └─ Complex OAuth flows (get_token, get_api_key)
+        → IdentityClient (NOT DEPRECATED - keep using)
 ```
