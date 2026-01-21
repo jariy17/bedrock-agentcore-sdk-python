@@ -1578,30 +1578,6 @@ api_key = client.get_resource_api_key(
 - **For imperative use cases** (caching, instance variables, dynamic providers): Use `UnifiedBedrockAgentCoreClient.get_resource_api_key()`
 - Both approaches fully supported - choose based on your needs
 
-**Example: Imperative API Key Caching**
-```python
-from bedrock_agentcore import UnifiedBedrockAgentCoreClient
-
-client = UnifiedBedrockAgentCoreClient(region_name="us-west-2")
-
-class APIKeyManager:
-    def __init__(self):
-        self.keys = {}
-
-    def get_key(self, provider: str, workload_token: str):
-        if provider in self.keys:
-            return self.keys[provider]
-
-        # Direct boto3 operation call via UnifiedClient
-        api_key = client.get_resource_api_key(
-            resourceCredentialProviderName=provider,
-            workloadIdentityToken=workload_token
-        )["apiKey"]
-
-        self.keys[provider] = api_key
-        return api_key
-```
-
 ---
 
 #### `get_token()`
