@@ -71,7 +71,7 @@ This document provides detailed migration instructions for deprecated operations
     - ✅ [`delete_credential_provider()`](#delete_credential_provider)
   - [Token Operations](#token-operations)
     - ✅ [`get_workload_access_token()`](#get_workload_access_token)
-    - ✅ [`get_token()` and `get_api_key()`](#get_token-and-get_api_key)
+    - ⚠️ [`get_token()` and `get_api_key()`](#get_token-and-get_api_key)
 - [Summary Tables](#summary-tables)
 - [Quick Reference: Helper Functions](#quick-reference-helper-functions)
 - [Migration Decision Tree](#migration-decision-tree)
