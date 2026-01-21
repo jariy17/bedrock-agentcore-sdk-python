@@ -3,7 +3,7 @@
 This document provides detailed migration instructions for deprecated operations in `MemoryClient` and `IdentityClient`:
 
 - **MemoryClient**: All operations are deprecated. Migrate to `UnifiedBedrockAgentCoreClient` (control plane) and `MemorySessionManager` (data plane).
-- **IdentityClient**: Only simple boto3 wrapper methods are deprecated. **OAuth flow methods (`get_token()`, `get_api_key()`) remain in IdentityClient** as they provide business logic beyond simple API calls.
+- **IdentityClient**: Simple boto3 wrapper methods are deprecated. **For OAuth flows (`get_token()`, `get_api_key()`), migrate to auth decorators** from `bedrock_agentcore.identity.auth` (`@requires_access_token`, `@requires_api_key`).
 
 ## Table of Contents
 
@@ -1386,10 +1386,11 @@ token = client.get_workload_access_token(
 
 #### `get_token()` and `get_api_key()`
 
-**NOT DEPRECATED** - These methods remain in IdentityClient.
+**RECOMMENDED MIGRATION**: Use decorators from `bedrock_agentcore.identity.auth` instead of calling IdentityClient methods directly.
 
-These methods provide business logic (async OAuth flows with token polling) that goes beyond simple boto3 wrappers. Continue using IdentityClient for these operations:
+The auth decorators provide a cleaner, more ergonomic API for OAuth flows and API key retrieval.
 
+**Before (IdentityClient direct usage):**
 ```python
 from bedrock_agentcore.services import IdentityClient
 
@@ -1409,9 +1410,37 @@ api_key = await client.get_api_key(
 )
 ```
 
+**After (Recommended - Use auth decorators):**
+```python
+from bedrock_agentcore.identity.auth import requires_access_token, requires_api_key
+
+# OAuth flow with decorator
+@requires_access_token(
+    provider_name="my-oauth-provider",
+    into="access_token",
+    scopes=["read:user"],
+    auth_flow="USER_FEDERATION",
+    on_auth_url=lambda url: print(f"Visit: {url}")
+)
+def my_function(*, access_token: str):
+    # Token is automatically injected
+    print(f"Got token: {access_token}")
+
+# API key with decorator
+@requires_api_key(
+    provider_name="my-api-provider",
+    into="api_key"
+)
+def call_api(*, api_key: str):
+    # API key is automatically injected
+    print(f"Got key: {api_key}")
+```
+
 **Migration Notes:**
-- No migration needed - these methods stay in IdentityClient
-- These provide async OAuth flow handling that UnifiedClient doesn't replace
+- **Preferred approach**: Use decorators from `bedrock_agentcore.identity.auth`
+- Decorators handle token/key fetching automatically and inject them as parameters
+- Decorators work with both sync and async functions
+- For advanced use cases, IdentityClient methods remain available (not deprecated)
 
 ---
 
@@ -1435,7 +1464,7 @@ api_key = await client.get_api_key(
 | **Workload Identity (Simple)** | 5 | Easy | UnifiedBedrockAgentCoreClient |
 | **Credential Providers** | 5 | Easy | UnifiedBedrockAgentCoreClient |
 | **Token Operations (Simple)** | 1 | Easy | UnifiedBedrockAgentCoreClient |
-| **OAuth Flow (get_token, get_api_key)** | 2 | N/A | **NOT DEPRECATED - Keep using IdentityClient** |
+| **OAuth Flow (get_token, get_api_key)** | 2 | Easy | **Use auth decorators** (`@requires_access_token`, `@requires_api_key`) |
 
 ---
 
@@ -1540,6 +1569,7 @@ Do you need memory operations?
     ├─ Simple identity/credential operations (create/get/update/delete)
     │   → UnifiedBedrockAgentCoreClient
     │
-    └─ Complex OAuth flows (get_token, get_api_key)
-        → IdentityClient (NOT DEPRECATED - keep using)
+    └─ OAuth flows (get_token, get_api_key)
+        → Auth decorators: @requires_access_token, @requires_api_key
+           (from bedrock_agentcore.identity.auth)
 ```
