@@ -5,6 +5,93 @@ This document provides detailed migration instructions for deprecated operations
 - **MemoryClient**: All operations are deprecated. Migrate to `UnifiedBedrockAgentCoreClient` (control plane) and `MemorySessionManager` (data plane).
 - **IdentityClient**: Simple boto3 wrapper methods are deprecated. **For OAuth flows (`get_token()`, `get_api_key()`), migrate to auth decorators** from `bedrock_agentcore.identity.auth` (`@requires_access_token`, `@requires_api_key`).
 
+---
+
+## ⚠️ Important: CodeInterpreter and BrowserClient are NOT Deprecated
+
+**`CodeInterpreter` and `BrowserClient` will remain fully supported and are NOT being deprecated.**
+
+### Why These Clients Are Different
+
+Unlike `MemoryClient` and `IdentityClient` (which are thin wrappers around boto3 clients), `CodeInterpreter` and `BrowserClient` are **stateful clients** that maintain active session state:
+
+**State Maintained:**
+- `identifier` - Current interpreter/browser identifier
+- `session_id` - Active session ID
+- Additional session context (e.g., uploaded files in CodeInterpreter)
+
+**Stateful Workflow Example (CodeInterpreter):**
+```python
+client = CodeInterpreter('us-west-2')
+client.start()                    # Creates session, stores state
+
+# All operations use stored session state
+client.execute_code("x = 5")      # No need to pass identifier/session_id
+client.execute_code("print(x)")   # Variables persist (same session)
+client.upload_file("data.csv", content)
+result = client.execute_code("import pandas; df = pd.read_csv('data.csv')")
+
+client.stop()                     # Cleanup
+```
+
+**Without Stateful Client (using UnifiedClient):**
+```python
+# Customer must manually track and pass state everywhere
+session = client.start_code_interpreter_session(codeInterpreterIdentifier="aws.codeinterpreter.v1")
+identifier = session['codeInterpreterIdentifier']
+session_id = session['sessionId']
+
+# Every call requires passing state
+client.invoke_code_interpreter(
+    codeInterpreterIdentifier=identifier,  # Must pass
+    sessionId=session_id,                   # Must pass
+    method="execute",
+    parameters={"code": "x = 5"}
+)
+
+client.invoke_code_interpreter(
+    codeInterpreterIdentifier=identifier,  # Must pass again
+    sessionId=session_id,                   # Must pass again
+    method="execute",
+    parameters={"code": "print(x)"}
+)
+
+# Customer must remember to cleanup
+client.stop_code_interpreter_session(
+    codeInterpreterIdentifier=identifier,
+    sessionId=session_id
+)
+```
+
+### Key Features That Cannot Be Replaced
+
+**CodeInterpreter:**
+1. **Session state management** - Automatic tracking of identifier/session_id
+2. **Auto-start logic** - Automatically starts session if not active
+3. **File I/O helpers** - Base64 encoding/decoding, file metadata tracking
+4. **Package management** - `install_packages()` constructs pip install commands
+5. **Context management** - `with code_session() as client:` for automatic cleanup
+6. **Execution helpers** - `execute_code()`, `execute_command()` with language parameter handling
+
+**BrowserClient:**
+1. **Session state management** - Automatic tracking of identifier/session_id
+2. **WebSocket authentication** - `generate_ws_headers()` with SigV4 signing (~50 lines of complex logic)
+3. **Presigned URLs** - `generate_live_view_url()` with SigV4QueryAuth (~40 lines)
+4. **Stream control** - `take_control()` / `release_control()` helpers
+5. **Context management** - `with browser_session() as client:` for automatic cleanup
+
+### Value Proposition
+
+These clients save customers **hundreds of lines of boilerplate** per application:
+- ~150+ lines for session state management
+- ~100+ lines for file I/O with encoding (CodeInterpreter)
+- ~90+ lines for WebSocket SigV4 signing (BrowserClient)
+- ~40+ lines for presigned URL generation (BrowserClient)
+
+**Recommendation: Continue using `CodeInterpreter` and `BrowserClient` as-is. No migration needed.**
+
+---
+
 ## Table of Contents
 
 - [MemoryClient Migration](#memoryclient-migration)
