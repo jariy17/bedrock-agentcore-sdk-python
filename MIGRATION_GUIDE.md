@@ -1586,7 +1586,103 @@ def call_api(*, api_key: str):
 - **Preferred approach**: Use decorators from `bedrock_agentcore.identity.auth`
 - Decorators handle token/key fetching automatically and inject them as parameters
 - Decorators work with both sync and async functions
-- For advanced use cases, IdentityClient methods remain available (not deprecated)
+
+**⚠️ CAUTION: When Decorators Are NOT Sufficient**
+
+Decorators work by **injecting tokens as function parameters** (declarative approach). However, you need **imperative** `get_token()` / `get_api_key()` calls when:
+
+**1. Token Reuse Across Multiple Calls**
+```python
+# ❌ Decorator fetches token 3 times (inefficient)
+@requires_access_token(provider_name="github", scopes=["read:user"])
+def get_user(): ...
+
+@requires_access_token(provider_name="github", scopes=["read:user"])
+def get_repos(): ...
+
+# ✅ Fetch once, reuse (need imperative approach)
+token = await identity_client.get_token(provider_name="github", ...)
+user = get_user_raw(token)
+repos = get_repos_raw(token)
+```
+
+**2. Storing Tokens in Instance Variables**
+```python
+class GitHubClient:
+    def __init__(self):
+        # Can't use decorator in __init__
+        self.token = identity_client.get_token(provider_name="github", ...)
+
+    def get_user(self):
+        return api_call(self.token)  # Reuse instance token
+```
+
+**3. Token Caching / Storage**
+```python
+# Store in cache/database for reuse
+token = await identity_client.get_token(...)
+cache.set(f"token:{user_id}", token, ttl=3600)
+```
+
+**4. Dynamic Provider Selection**
+```python
+# Provider determined at runtime (can't hardcode in decorator)
+provider = determine_provider(user)
+token = await identity_client.get_token(provider_name=provider, ...)
+```
+
+**5. Conditional Token Fetching**
+```python
+if requires_authentication:
+    token = await identity_client.get_token(...)
+    return call_with_auth(token)
+else:
+    return call_without_auth()
+```
+
+**6. Background Tasks / Workers**
+```python
+# No function decoration context
+def worker():
+    token = identity_client.get_token(...)
+    process_jobs(token)
+```
+
+**7. Multiple Tokens for Different Users**
+```python
+for user in users:
+    # Can't parameterize decorator per iteration
+    token = identity_client.get_token(workload_name=user.workload, ...)
+    send_notification(user, token)
+```
+
+**⚠️ DEPRECATION IMPACT:**
+
+Since `IdentityClient` (including `get_token()` and `get_api_key()`) will be deprecated, **customers with these advanced use cases will lose functionality**.
+
+**Recommendations Before Deprecating:**
+
+1. **Option A: Don't deprecate `get_token()` and `get_api_key()`** - Keep these methods available for advanced use cases where decorators don't work
+   - Decorators are great for 80% of use cases
+   - Imperative methods needed for remaining 20% (token reuse, caching, dynamic providers)
+
+2. **Option B: Provide imperative helper functions** - If deprecating IdentityClient, add utility functions:
+   ```python
+   # In bedrock_agentcore.identity.auth module
+   async def get_oauth_token(provider_name: str, scopes: List[str], ...) -> str:
+       """Get OAuth token imperatively (not decorator)."""
+       ...
+
+   async def get_provider_api_key(provider_name: str) -> str:
+       """Get API key imperatively (not decorator)."""
+       ...
+   ```
+
+3. **Option C: Accept limited functionality** - Document that these advanced patterns are not supported after deprecation
+
+**Current Recommendation:**
+- **For most use cases**: Migrate to decorators (`@requires_access_token`, `@requires_api_key`)
+- **For advanced use cases**: Migration path TBD - depends on deprecation decision above
 
 ---
 
