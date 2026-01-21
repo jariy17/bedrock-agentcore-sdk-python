@@ -75,7 +75,7 @@ This document provides detailed migration instructions for deprecated operations
     - ⚠️ [`get_token()`](#get_token)
 - [Summary Tables](#summary-tables)
 - [Quick Reference: Helper Functions](#quick-reference-helper-functions)
-- [Migration Decision Tree](#migration-decision-tree)
+- [Appendix: When OAuth Decorators Are NOT Sufficient](#appendix-when-oauth-decorators-are-not-sufficient)
 
 ---
 
@@ -1642,101 +1642,7 @@ def my_function(*, access_token: str):
 - Decorator handles OAuth flow and token polling automatically
 - Works with both sync and async functions
 
-**⚠️ CAUTION: When Decorators Are NOT Sufficient**
-
-Decorators work by **injecting tokens as function parameters** (declarative approach). However, you need **imperative** `get_token()` calls when:
-
-**1. Token Reuse Across Multiple Calls**
-```python
-# ❌ Decorator fetches token 3 times (inefficient)
-@requires_access_token(provider_name="github", scopes=["read:user"])
-def get_user(): ...
-
-@requires_access_token(provider_name="github", scopes=["read:user"])
-def get_repos(): ...
-
-# ✅ Fetch once, reuse (need imperative approach)
-token = await identity_client.get_token(provider_name="github", ...)
-user = get_user_raw(token)
-repos = get_repos_raw(token)
-```
-
-**2. Storing Tokens in Instance Variables**
-```python
-class GitHubClient:
-    def __init__(self):
-        # Can't use decorator in __init__
-        self.token = identity_client.get_token(provider_name="github", ...)
-
-    def get_user(self):
-        return api_call(self.token)  # Reuse instance token
-```
-
-**3. Token Caching / Storage**
-```python
-# Store in cache/database for reuse
-token = await identity_client.get_token(...)
-cache.set(f"token:{user_id}", token, ttl=3600)
-```
-
-**4. Dynamic Provider Selection**
-```python
-# Provider determined at runtime (can't hardcode in decorator)
-provider = determine_provider(user)
-token = await identity_client.get_token(provider_name=provider, ...)
-```
-
-**5. Conditional Token Fetching**
-```python
-if requires_authentication:
-    token = await identity_client.get_token(...)
-    return call_with_auth(token)
-else:
-    return call_without_auth()
-```
-
-**6. Background Tasks / Workers**
-```python
-# No function decoration context
-def worker():
-    token = identity_client.get_token(...)
-    process_jobs(token)
-```
-
-**7. Multiple Tokens for Different Users**
-```python
-for user in users:
-    # Can't parameterize decorator per iteration
-    token = identity_client.get_token(workload_name=user.workload, ...)
-    send_notification(user, token)
-```
-
-**⚠️ DEPRECATION IMPACT:**
-
-Since `IdentityClient.get_token()` will be deprecated, **customers with these advanced use cases will lose functionality**.
-
-**Recommendations Before Deprecating:**
-
-1. **Option A: Don't deprecate `get_token()`** - Keep this method available for advanced use cases where decorators don't work
-   - Decorators are great for 80% of use cases
-   - Imperative method needed for remaining 20% (token reuse, caching, dynamic providers)
-
-2. **Option B: Provide imperative helper function** - If deprecating IdentityClient, add utility function:
-   ```python
-   # In bedrock_agentcore.identity.auth module
-   async def get_oauth_token(provider_name: str, scopes: List[str], ...) -> str:
-       """Get OAuth token imperatively (not decorator).
-
-       Wraps get_resource_oauth2_token with polling logic.
-       """
-       ...
-   ```
-
-3. **Option C: Accept limited functionality** - Document that these advanced patterns are not supported after deprecation
-
-**Current Recommendation:**
-- **For most use cases**: Migrate to `@requires_access_token` decorator
-- **For imperative use cases**: Migration path TBD - depends on deprecation decision above
+**⚠️ Important:** Decorators work by injecting tokens as function parameters (declarative approach). For imperative use cases (token reuse, caching, instance variables, dynamic providers, background workers, etc.), see [Appendix: When OAuth Decorators Are NOT Sufficient](#appendix-when-oauth-decorators-are-not-sufficient) for details on migration options
 
 ---
 
@@ -1847,25 +1753,115 @@ add_strategy_and_wait(
 
 ---
 
-## Migration Decision Tree
+## Appendix: When OAuth Decorators Are NOT Sufficient
 
+Decorators work by **injecting tokens as function parameters** (declarative approach). However, you need **imperative** `get_token()` calls when:
+
+### 1. Token Reuse Across Multiple Calls
+
+```python
+# ❌ Decorator fetches token 3 times (inefficient)
+@requires_access_token(provider_name="github", scopes=["read:user"])
+def get_user(): ...
+
+@requires_access_token(provider_name="github", scopes=["read:user"])
+def get_repos(): ...
+
+# ✅ Fetch once, reuse (need imperative approach)
+token = await identity_client.get_token(provider_name="github", ...)
+user = get_user_raw(token)
+repos = get_repos_raw(token)
 ```
-Do you need memory operations?
-├─ YES: Memory Operations
-│   ├─ Control plane (create, update, delete, strategies)?
-│   │   ├─ Simple CRUD → UnifiedBedrockAgentCoreClient
-│   │   └─ Need polling → UnifiedClient + Helper Functions
-│   │
-│   └─ Data plane (conversations, events)?
-│       ├─ Simple event CRUD → MemorySessionManager (preferred)
-│       └─ Conversation helpers (save_conversation, process_turn_with_llm)
-│           → MemorySessionManager (MUST USE)
-│
-└─ NO: Identity Operations
-    ├─ Simple identity/credential operations (create/get/update/delete)
-    │   → UnifiedBedrockAgentCoreClient
-    │
-    └─ OAuth flows (get_token, get_api_key)
-        → Auth decorators: @requires_access_token, @requires_api_key
-           (from bedrock_agentcore.identity.auth)
+
+### 2. Storing Tokens in Instance Variables
+
+```python
+class GitHubClient:
+    def __init__(self):
+        # Can't use decorator in __init__
+        self.token = identity_client.get_token(provider_name="github", ...)
+
+    def get_user(self):
+        return api_call(self.token)  # Reuse instance token
 ```
+
+### 3. Token Caching / Storage
+
+```python
+# Store in cache/database for reuse
+token = await identity_client.get_token(...)
+cache.set(f"token:{user_id}", token, ttl=3600)
+```
+
+### 4. Dynamic Provider Selection
+
+```python
+# Provider determined at runtime (can't hardcode in decorator)
+provider = determine_provider(user)
+token = await identity_client.get_token(provider_name=provider, ...)
+```
+
+### 5. Conditional Token Fetching
+
+```python
+if requires_authentication:
+    token = await identity_client.get_token(...)
+    return call_with_auth(token)
+else:
+    return call_without_auth()
+```
+
+### 6. Background Tasks / Workers
+
+```python
+# No function decoration context
+def worker():
+    token = identity_client.get_token(...)
+    process_jobs(token)
+```
+
+### 7. Multiple Tokens for Different Users
+
+```python
+for user in users:
+    # Can't parameterize decorator per iteration
+    token = identity_client.get_token(workload_name=user.workload, ...)
+    send_notification(user, token)
+```
+
+---
+
+### ⚠️ Deprecation Impact
+
+Since `IdentityClient.get_token()` will be deprecated, **customers with these advanced use cases will lose functionality**.
+
+### Recommendations Before Deprecating
+
+**Option A: Don't deprecate `get_token()`**
+- Keep this method available for advanced use cases where decorators don't work
+- Decorators are great for 80% of use cases
+- Imperative method needed for remaining 20% (token reuse, caching, dynamic providers)
+
+**Option B: Provide imperative helper function**
+
+If deprecating IdentityClient, add utility function:
+
+```python
+# In bedrock_agentcore.identity.auth module
+async def get_oauth_token(provider_name: str, scopes: List[str], ...) -> str:
+    """Get OAuth token imperatively (not decorator).
+
+    Wraps get_resource_oauth2_token with polling logic.
+    """
+    ...
+```
+
+**Option C: Accept limited functionality**
+- Document that these advanced patterns are not supported after deprecation
+
+---
+
+### Current Recommendation
+
+- **For most use cases**: Migrate to `@requires_access_token` decorator
+- **For imperative use cases**: Migration path TBD - depends on deprecation decision above
