@@ -71,7 +71,8 @@ This document provides detailed migration instructions for deprecated operations
     - ✅ [`delete_credential_provider()`](#delete_credential_provider)
   - [Token Operations](#token-operations)
     - ✅ [`get_workload_access_token()`](#get_workload_access_token)
-    - ⚠️ [`get_token()` and `get_api_key()`](#get_token-and-get_api_key)
+    - ✅ [`get_api_key()`](#get_api_key)
+    - ⚠️ [`get_token()`](#get_token)
 - [Summary Tables](#summary-tables)
 - [Quick Reference: Helper Functions](#quick-reference-helper-functions)
 - [Migration Decision Tree](#migration-decision-tree)
@@ -1530,13 +1531,82 @@ token = client.get_workload_access_token(
 
 ---
 
-#### `get_token()` and `get_api_key()`
+#### `get_api_key()`
 
-**RECOMMENDED MIGRATION**: Use decorators from `bedrock_agentcore.identity.auth` instead of calling IdentityClient methods directly.
+**Before (IdentityClient):**
+```python
+from bedrock_agentcore.services import IdentityClient
 
-The auth decorators provide a cleaner, more ergonomic API for OAuth flows and API key retrieval.
+client = IdentityClient(region="us-west-2")
 
-**Before (IdentityClient direct usage):**
+# Get API key with async support
+api_key = await client.get_api_key(
+    provider_name="my-provider",
+    agent_identity_token=token
+)
+```
+
+**After (Recommended - Use decorator):**
+```python
+from bedrock_agentcore.identity.auth import requires_api_key
+
+# API key with decorator
+@requires_api_key(
+    provider_name="my-api-provider",
+    into="api_key"
+)
+def call_api(*, api_key: str):
+    # API key is automatically injected
+    print(f"Got key: {api_key}")
+```
+
+**Alternative (For imperative use cases - UnifiedBedrockAgentCoreClient):**
+```python
+from bedrock_agentcore import UnifiedBedrockAgentCoreClient
+
+client = UnifiedBedrockAgentCoreClient(region_name="us-west-2")
+
+# Use Case: Token caching, instance variables, dynamic providers, etc.
+api_key = client.get_resource_api_key(
+    resourceCredentialProviderName="my-provider",
+    workloadIdentityToken="<token>"
+)["apiKey"]
+```
+
+**Migration Notes:**
+- **For most use cases**: Use `@requires_api_key` decorator (simpler, cleaner)
+- **For imperative use cases** (caching, instance variables, dynamic providers): Use `UnifiedBedrockAgentCoreClient.get_resource_api_key()`
+- Both approaches fully supported - choose based on your needs
+
+**Example: Imperative API Key Caching**
+```python
+from bedrock_agentcore import UnifiedBedrockAgentCoreClient
+
+client = UnifiedBedrockAgentCoreClient(region_name="us-west-2")
+
+class APIKeyManager:
+    def __init__(self):
+        self.keys = {}
+
+    def get_key(self, provider: str, workload_token: str):
+        if provider in self.keys:
+            return self.keys[provider]
+
+        # Direct boto3 operation call via UnifiedClient
+        api_key = client.get_resource_api_key(
+            resourceCredentialProviderName=provider,
+            workloadIdentityToken=workload_token
+        )["apiKey"]
+
+        self.keys[provider] = api_key
+        return api_key
+```
+
+---
+
+#### `get_token()`
+
+**Before (IdentityClient):**
 ```python
 from bedrock_agentcore.services import IdentityClient
 
@@ -1548,17 +1618,11 @@ token = await client.get_token(
     user_token="oauth-token",
     on_auth_url=lambda url: print(f"Visit: {url}")
 )
-
-# Get API key with async support
-api_key = await client.get_api_key(
-    provider_name="my-provider",
-    agent_identity_token=token
-)
 ```
 
-**After (Recommended - Use auth decorators):**
+**After (Recommended - Use decorator):**
 ```python
-from bedrock_agentcore.identity.auth import requires_access_token, requires_api_key
+from bedrock_agentcore.identity.auth import requires_access_token
 
 # OAuth flow with decorator
 @requires_access_token(
@@ -1571,25 +1635,16 @@ from bedrock_agentcore.identity.auth import requires_access_token, requires_api_
 def my_function(*, access_token: str):
     # Token is automatically injected
     print(f"Got token: {access_token}")
-
-# API key with decorator
-@requires_api_key(
-    provider_name="my-api-provider",
-    into="api_key"
-)
-def call_api(*, api_key: str):
-    # API key is automatically injected
-    print(f"Got key: {api_key}")
 ```
 
 **Migration Notes:**
-- **Preferred approach**: Use decorators from `bedrock_agentcore.identity.auth`
-- Decorators handle token/key fetching automatically and inject them as parameters
-- Decorators work with both sync and async functions
+- **Preferred approach**: Use `@requires_access_token` decorator from `bedrock_agentcore.identity.auth`
+- Decorator handles OAuth flow and token polling automatically
+- Works with both sync and async functions
 
 **⚠️ CAUTION: When Decorators Are NOT Sufficient**
 
-Decorators work by **injecting tokens as function parameters** (declarative approach). However, you need **imperative** `get_token()` / `get_api_key()` calls when:
+Decorators work by **injecting tokens as function parameters** (declarative approach). However, you need **imperative** `get_token()` calls when:
 
 **1. Token Reuse Across Multiple Calls**
 ```python
@@ -1658,24 +1713,9 @@ for user in users:
 
 **⚠️ DEPRECATION IMPACT:**
 
-Since `IdentityClient` (including `get_token()` and `get_api_key()`) will be deprecated, **customers with these advanced use cases will lose functionality**.
+Since `IdentityClient.get_token()` will be deprecated, **customers with these advanced use cases will lose functionality**.
 
 **Recommendations Before Deprecating:**
-
-**For `get_api_key()`:**
-✅ Can be replaced with `UnifiedBedrockAgentCoreClient` directly:
-```python
-from bedrock_agentcore import UnifiedBedrockAgentCoreClient
-
-client = UnifiedBedrockAgentCoreClient(region_name="us-west-2")
-api_key = client.get_resource_api_key(
-    resourceCredentialProviderName="my-provider",
-    workloadIdentityToken="<token>"
-)["apiKey"]
-```
-
-**For `get_token()`:**
-Cannot be replaced with UnifiedBedrockAgentCoreClient alone (has polling logic). Options:
 
 1. **Option A: Don't deprecate `get_token()`** - Keep this method available for advanced use cases where decorators don't work
    - Decorators are great for 80% of use cases
@@ -1695,35 +1735,8 @@ Cannot be replaced with UnifiedBedrockAgentCoreClient alone (has polling logic).
 3. **Option C: Accept limited functionality** - Document that these advanced patterns are not supported after deprecation
 
 **Current Recommendation:**
-- **For most use cases**: Migrate to decorators (`@requires_access_token`, `@requires_api_key`)
-- **For imperative `get_api_key()` use cases**: Use `UnifiedBedrockAgentCoreClient.get_resource_api_key()`
-- **For imperative `get_token()` use cases**: Migration path TBD - depends on deprecation decision above
-
-**Example: Imperative API Key with UnifiedBedrockAgentCoreClient**
-
-```python
-from bedrock_agentcore import UnifiedBedrockAgentCoreClient
-
-client = UnifiedBedrockAgentCoreClient(region_name="us-west-2")
-
-# Use Case: Token caching
-class APIKeyManager:
-    def __init__(self):
-        self.keys = {}
-
-    def get_key(self, provider: str, workload_token: str):
-        if provider in self.keys:
-            return self.keys[provider]
-
-        # Direct boto3 operation call via UnifiedClient
-        api_key = client.get_resource_api_key(
-            resourceCredentialProviderName=provider,
-            workloadIdentityToken=workload_token
-        )["apiKey"]
-
-        self.keys[provider] = api_key
-        return api_key
-```
+- **For most use cases**: Migrate to `@requires_access_token` decorator
+- **For imperative use cases**: Migration path TBD - depends on deprecation decision above
 
 ---
 
