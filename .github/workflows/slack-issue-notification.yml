@@ -3,6 +3,8 @@ name: Slack Issue Notification
 on:
   issues:
     types: [opened]
+    
+permissions: {}
 
 jobs:
   notify-slack:
