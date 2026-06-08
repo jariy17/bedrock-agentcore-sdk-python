@@ -1,27 +1,20 @@
 """Integration tests for A2A protocol support.
 
-Uses a real A2AStarletteApplication + DefaultRequestHandler with a concrete
-executor -- no mocks for the a2a-sdk layer. Every test sends real HTTP
-requests through the full stack.
+Uses the real a2a-sdk v1.x JSON-RPC routes (``create_jsonrpc_routes``) +
+``DefaultRequestHandler`` with a concrete executor -- no mocks for the
+a2a-sdk layer. Every test sends real HTTP requests through the full stack.
 """
 
 import json
 import uuid
 
 import pytest
+from a2a.compat.v0_3.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.helpers import new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import TaskUpdater
-from a2a.types import (
-    AgentCapabilities,
-    AgentCard,
-    AgentSkill,
-    Part,
-    TextPart,
-    UnsupportedOperationError,
-)
-from a2a.utils import new_task
-from a2a.utils.errors import ServerError
+from a2a.utils.errors import UnsupportedOperationError
 from starlette.testclient import TestClient
 
 from bedrock_agentcore.runtime.a2a import BedrockCallContextBuilder, build_a2a_app
@@ -36,7 +29,7 @@ class EchoExecutor(AgentExecutor):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         self.last_call_context = context.call_context
-        task = context.current_task or new_task(context.message)
+        task = context.current_task or new_task_from_user_message(context.message)
         if not context.current_task:
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
@@ -44,11 +37,11 @@ class EchoExecutor(AgentExecutor):
         user_text = context.get_user_input()
         self.last_user_text = user_text
 
-        await updater.add_artifact([Part(root=TextPart(text=f"echo: {user_text}"))])
+        await updater.add_artifact([new_text_part(f"echo: {user_text}")])
         await updater.complete()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
-        raise ServerError(error=UnsupportedOperationError())
+        raise UnsupportedOperationError()
 
 
 def _make_card() -> AgentCard:
@@ -231,7 +224,10 @@ class TestA2AServerIntegration:
         ctx = echo_executor.last_call_context
         assert ctx is not None
         assert ctx.state["session_id"] == "integ-sess-1"
-        assert ctx.state["request_id"] == "integ-req-1"
+        # a2a-sdk v1.x: the JSON-RPC dispatcher overwrites state["request_id"]
+        # with the JSON-RPC envelope id after the context builder runs, so the
+        # Bedrock runtime request id is preserved under bedrock_request_id.
+        assert ctx.state["bedrock_request_id"] == "integ-req-1"
         assert ctx.state["workload_access_token"] == "integ-token"
         assert ctx.state["oauth2_callback_url"] == "https://callback.example.com"
 

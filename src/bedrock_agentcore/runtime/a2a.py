@@ -2,6 +2,15 @@
 
 Provides Bedrock-specific glue around the official a2a-sdk, handling header
 extraction, health checks, and Docker host detection.
+
+Targets a2a-sdk 1.x. The a2a-sdk 1.0 release redesigned the server API: the
+``a2a.server.apps`` app-wrapper module was removed in favour of route factories
+in ``a2a.server.routes`` (e.g. :func:`create_jsonrpc_routes`) that are attached
+directly to a Starlette app. To preserve the wire format and ``AgentCard`` shape
+that Bedrock AgentCore agents already depend on (top-level ``url`` field,
+snake_case JSON-RPC payloads such as ``message/send``), this module serves the
+v0.3-compatible JSON-RPC endpoint (``enable_v0_3_compat=True``) and builds the
+agent card from the ``a2a.compat.v0_3`` pydantic models.
 """
 
 import logging
@@ -43,9 +52,18 @@ def _build_agent_card(executor: Any, url: str) -> Any:
     """Build an AgentCard by introspecting a StrandsA2AExecutor.
 
     Extracts name/description from ``executor.agent``. Falls back to generic
-    defaults for other executors.
+    defaults for other executors. Returns a v0.3-compatible
+    ``a2a.compat.v0_3.types.AgentCard`` so the served card keeps a top-level
+    ``url`` field, which Bedrock AgentCore clients rely on.
+
+    Args:
+        executor: The agent executor to introspect.
+        url: The agent invocation URL to advertise in the card.
+
+    Returns:
+        An ``a2a.compat.v0_3.types.AgentCard`` instance.
     """
-    from a2a.types import AgentCapabilities, AgentCard, AgentSkill
+    from a2a.compat.v0_3.types import AgentCapabilities, AgentCard, AgentSkill
 
     name = "agent"
     description = "A Bedrock AgentCore agent"
@@ -95,11 +113,24 @@ def build_runtime_url(agent_arn: str, region: Optional[str] = None) -> str:
     return f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations"
 
 
+def _make_call_context_builder_base() -> type:
+    """Return the a2a-sdk v1.x ``ServerCallContextBuilder`` base class.
+
+    Imported lazily so this module can be imported without a2a-sdk installed.
+    """
+    from a2a.server.routes import ServerCallContextBuilder
+
+    return ServerCallContextBuilder
+
+
 class BedrockCallContextBuilder:
     """Extracts Bedrock runtime headers and propagates them into BedrockAgentCoreContext.
 
-    Implements the a2a-sdk CallContextBuilder ABC so the A2A server
-    automatically calls ``build()`` on every incoming request.
+    Conforms to the a2a-sdk v1.x ``ServerCallContextBuilder`` interface so the
+    A2A JSON-RPC dispatcher calls ``build()`` on every incoming request. It is
+    registered as a virtual subclass of that ABC at the bottom of this module so
+    ``isinstance`` checks succeed without requiring a2a-sdk to be importable at
+    class-definition time.
     """
 
     def __init__(self) -> None:
@@ -114,7 +145,8 @@ class BedrockCallContextBuilder:
             request: A Starlette Request object.
 
         Returns:
-            A ServerCallContext with Bedrock headers stored in ``state``.
+            A ``a2a.server.context.ServerCallContext`` with Bedrock headers
+            stored in ``state``.
         """
         from a2a.server.context import ServerCallContext
 
@@ -160,8 +192,16 @@ class BedrockCallContextBuilder:
         BedrockAgentCoreContext.set_routing_experiment(experiment_arn, experiment_variant)
         _ensure_baggage_processor_registered()
 
+        # NOTE (a2a-sdk v1.x): the JSON-RPC dispatcher overwrites
+        # ``state["request_id"]`` with the JSON-RPC envelope id *after* this
+        # builder runs (see a2a.server.routes.jsonrpc_dispatcher), so the
+        # Bedrock runtime request id is also mirrored under a dedicated,
+        # non-colliding ``bedrock_request_id`` key. The authoritative
+        # propagation path is the ``BedrockAgentCoreContext`` contextvar set
+        # via ``set_request_context`` above, which is unaffected.
         state = {
             "request_id": request_id,
+            "bedrock_request_id": request_id,
             "session_id": session_id,
         }
         if workload_access_token:
@@ -172,12 +212,11 @@ class BedrockCallContextBuilder:
         return ServerCallContext(state=state)
 
 
-# Register as a virtual subclass so isinstance checks pass without
-# requiring a2a-sdk to be importable at class-definition time.
+# Register as a virtual subclass of the v1.x ServerCallContextBuilder ABC so
+# isinstance checks pass without requiring a2a-sdk to be importable at
+# class-definition time.
 try:
-    from a2a.server.apps import CallContextBuilder
-
-    CallContextBuilder.register(BedrockCallContextBuilder)
+    _make_call_context_builder_base().register(BedrockCallContextBuilder)
 except Exception:  # pragma: no cover
     pass
 
@@ -194,23 +233,29 @@ def build_a2a_app(
 
     Args:
         executor: An ``AgentExecutor`` that implements the agent logic.
-        agent_card: Optional ``a2a.types.AgentCard`` describing the agent.
-            If ``None``, one is built automatically by introspecting the executor.
+        agent_card: Optional agent card describing the agent. Accepts an
+            ``a2a.compat.v0_3.types.AgentCard`` (recommended — keeps the
+            top-level ``url`` field) or a v1.x ``a2a.types.AgentCard``. If
+            ``None``, one is built automatically by introspecting the executor.
         task_store: Optional ``TaskStore``; defaults to ``InMemoryTaskStore``.
-        context_builder: Optional ``CallContextBuilder``; defaults to
+        context_builder: Optional context builder conforming to the v1.x
+            ``ServerCallContextBuilder`` interface; defaults to
             ``BedrockCallContextBuilder``.
         ping_handler: Optional callback returning a ``PingStatus``.
 
     Returns:
-        A Starlette application.
+        A Starlette application exposing ``/ping``, the A2A JSON-RPC endpoint at
+        ``/`` (with v0.3 wire compatibility), and the agent card at
+        ``/.well-known/agent-card.json``.
     """
     import os
 
     _check_a2a_sdk()
 
-    from a2a.server.apps import A2AStarletteApplication
     from a2a.server.request_handlers import DefaultRequestHandler
+    from a2a.server.routes import create_jsonrpc_routes
     from a2a.server.tasks import InMemoryTaskStore
+    from a2a.utils.constants import AGENT_CARD_WELL_KNOWN_PATH, DEFAULT_RPC_URL
     from starlette.applications import Starlette
     from starlette.responses import JSONResponse
     from starlette.routing import Route
@@ -227,16 +272,29 @@ def build_a2a_app(
     if context_builder is None:
         context_builder = BedrockCallContextBuilder()
 
+    # The v1.x request handler and JSON-RPC routes operate on the core (protobuf)
+    # AgentCard, so convert if we were handed a v0.3-compatible pydantic card.
+    core_card = _to_core_agent_card(agent_card)
+
     http_handler = DefaultRequestHandler(
         agent_executor=executor,
         task_store=task_store,
+        agent_card=core_card,
     )
 
-    a2a_app = A2AStarletteApplication(
-        agent_card=agent_card,
-        http_handler=http_handler,
+    a2a_routes = create_jsonrpc_routes(
+        http_handler,
+        DEFAULT_RPC_URL,
         context_builder=context_builder,
+        enable_v0_3_compat=True,
     )
+
+    # Serve the agent card in the same shape the supplied card serializes to.
+    # For a v0.3 pydantic card this preserves the top-level ``url`` field.
+    card_payload = _agent_card_to_dict(agent_card)
+
+    async def _serve_agent_card(request: Any) -> JSONResponse:
+        return JSONResponse(card_payload)
 
     last_status_update_time = time.time()
 
@@ -253,12 +311,42 @@ def build_a2a_app(
             status = PingStatus.HEALTHY
         return JSONResponse({"status": status.value, "time_of_last_update": int(last_status_update_time)})
 
-    # Build the Starlette app with /ping included upfront, then add A2A routes,
-    # so we don't depend on mutating app.routes after build().
-    app = Starlette(routes=[Route("/ping", _handle_ping, methods=["GET"])])
-    a2a_app.add_routes_to_app(app)
+    routes = [
+        Route("/ping", _handle_ping, methods=["GET"]),
+        Route(AGENT_CARD_WELL_KNOWN_PATH, _serve_agent_card, methods=["GET"]),
+        *a2a_routes,
+    ]
+    return Starlette(routes=routes)
 
-    return app
+
+def _to_core_agent_card(agent_card: Any) -> Any:
+    """Convert an AgentCard to the v1.x core (protobuf) representation.
+
+    Accepts either an ``a2a.compat.v0_3.types.AgentCard`` (converted via the
+    compat layer) or an already-core ``a2a.types.AgentCard`` (returned as-is).
+    """
+    from a2a.compat.v0_3 import conversions
+    from a2a.compat.v0_3.types import AgentCard as CompatAgentCard
+
+    if isinstance(agent_card, CompatAgentCard):
+        return conversions.to_core_agent_card(agent_card)
+    return agent_card
+
+
+def _agent_card_to_dict(agent_card: Any) -> dict:
+    """Serialize an AgentCard to a JSON-ready dict for the well-known route.
+
+    v0.3 pydantic cards are dumped by alias (preserving the top-level ``url``
+    field); core protobuf cards fall back to the SDK helper.
+    """
+    from a2a.compat.v0_3.types import AgentCard as CompatAgentCard
+
+    if isinstance(agent_card, CompatAgentCard):
+        return agent_card.model_dump(mode="json", exclude_none=True, by_alias=True)
+
+    from a2a.server.request_handlers.response_helpers import agent_card_to_dict
+
+    return agent_card_to_dict(agent_card)
 
 
 def serve_a2a(
@@ -276,12 +364,12 @@ def serve_a2a(
 
     Args:
         executor: An ``AgentExecutor`` that implements the agent logic.
-        agent_card: Optional ``a2a.types.AgentCard`` describing the agent.
-            If ``None``, one is built automatically by introspecting the executor.
+        agent_card: Optional agent card describing the agent. If ``None``, one is
+            built automatically by introspecting the executor.
         port: Port to serve on (default 9000).
         host: Host to bind to; auto-detected if ``None``.
         task_store: Optional ``TaskStore``; defaults to ``InMemoryTaskStore``.
-        context_builder: Optional ``CallContextBuilder``; defaults to
+        context_builder: Optional context builder; defaults to
             ``BedrockCallContextBuilder``.
         ping_handler: Optional callback returning a ``PingStatus``.
         **kwargs: Additional arguments forwarded to ``uvicorn.run()``.

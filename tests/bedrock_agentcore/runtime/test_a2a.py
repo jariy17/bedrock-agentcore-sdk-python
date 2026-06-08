@@ -2,11 +2,11 @@ import contextvars
 import uuid
 from unittest.mock import patch
 
+from a2a.compat.v0_3.types import AgentCapabilities, AgentCard, AgentSkill
+from a2a.helpers import new_task_from_user_message, new_text_part
 from a2a.server.agent_execution import AgentExecutor, RequestContext
 from a2a.server.events import EventQueue
 from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
-from a2a.types import AgentCapabilities, AgentCard, AgentSkill, Part, TextPart
-from a2a.utils import new_task
 from starlette.testclient import TestClient
 
 from bedrock_agentcore.runtime.a2a import (
@@ -27,12 +27,12 @@ class _EchoExecutor(AgentExecutor):
 
     async def execute(self, context: RequestContext, event_queue: EventQueue) -> None:
         self.last_call_context = context.call_context
-        task = context.current_task or new_task(context.message)
+        task = context.current_task or new_task_from_user_message(context.message)
         if not context.current_task:
             await event_queue.enqueue_event(task)
         updater = TaskUpdater(event_queue, task.id, task.context_id)
         user_text = context.get_user_input()
-        await updater.add_artifact([Part(root=TextPart(text=f"echo: {user_text}"))])
+        await updater.add_artifact([new_text_part(f"echo: {user_text}")])
         await updater.complete()
 
     async def cancel(self, context: RequestContext, event_queue: EventQueue) -> None:
@@ -229,6 +229,7 @@ class TestBedrockCallContextBuilder:
             # Check ServerCallContext state dict
             assert result.state["session_id"] == "sess-abc"
             assert result.state["request_id"] == "req-456"
+            assert result.state["bedrock_request_id"] == "req-456"
             assert result.state["workload_access_token"] == "tok-xyz"
             assert result.state["oauth2_callback_url"] == "https://callback.example.com"
 
@@ -350,8 +351,12 @@ class TestBedrockCallContextBuilder:
             ctx = executor.last_call_context
             assert ctx is not None
             assert ctx.state["session_id"] == "unit-sess"
-            assert ctx.state["request_id"] == "unit-req"
             assert ctx.state["workload_access_token"] == "unit-token"
+            # In a2a-sdk v1.x the JSON-RPC dispatcher overwrites
+            # state["request_id"] with the JSON-RPC envelope id after the
+            # context builder runs, so the Bedrock runtime request id is
+            # preserved under the dedicated bedrock_request_id key.
+            assert ctx.state["bedrock_request_id"] == "unit-req"
 
         self._run_in_isolated_context(_test)
 
